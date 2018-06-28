@@ -3,6 +3,9 @@ import numpy as np
 
 from base_model import BaseModel
 
+import IPython
+
+
 class CaptionGenerator(BaseModel):
     def build(self):
         """ Build the model. """
@@ -334,6 +337,7 @@ class CaptionGenerator(BaseModel):
                        / tf.reduce_sum(masks)
 
         self.contexts = contexts
+        self.alpha = alpha # attention logits 196 = 14 * 14 (last conv layer of VGG16)
         if self.is_train:
             self.sentences = sentences
             self.masks = masks

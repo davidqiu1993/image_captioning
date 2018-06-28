@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 import matplotlib.pyplot as plt
+import cv2
 import cPickle as pickle
 import copy
 import json
@@ -12,6 +13,9 @@ from utils.nn import NN
 from utils.coco.coco import COCO
 from utils.coco.pycocoevalcap.eval import COCOEvalCap
 from utils.misc import ImageLoader, CaptionData, TopN
+
+import IPython
+
 
 class BaseModel(object):
     def __init__(self, config):
@@ -107,6 +111,72 @@ class BaseModel(object):
         scorer.evaluate()
         print("Evaluation complete.")
 
+    def _highlight_mask_area(self, mask, seg, loc, weight):
+        height = mask.shape[0]
+        width = mask.shape[1]
+        height_seg = float(height) / float(seg[1])
+        width_seg = float(width) / float(seg[0])
+
+        mask_augmented = np.zeros(mask.shape)
+        x_lower = int(loc[0] * width_seg)
+        x_upper = int((loc[0]+1) * width_seg)
+        y_lower = int(loc[1] * height_seg)
+        y_upper = int((loc[1]+1) * height_seg)
+        mask_augmented[y_lower:y_upper, x_lower:x_upper, :] = weight
+
+        mask = np.maximum(mask, mask_augmented)
+
+        return mask
+
+    def _test_save_attention_sequence(self, image_file_path, alpha_seq, word_seq, test_result_dir, verbose=True):
+        assert(len(alpha_seq) == len(word_seq))
+
+        # parse the image file name and extension
+        image_file_name = image_file_path.split(os.sep)[-1]
+        image_name, image_ext = os.path.splitext(image_file_name)
+
+        # verbose output
+        if verbose:
+            print(word_seq)
+
+        # construct attended images
+        seg = (14, 14) # 196 = 14 * 14 (last conv layer of VGG16)
+        attention_scale_base = 0.3
+        img = cv2.imread(image_file_path)
+        for i in range(len(alpha_seq)):
+            attention = np.reshape(alpha_seq[i], seg)
+            attention_scale_min = np.amin(attention)
+            attention_scale_max = np.amax(attention)
+            attention_scaled = (attention / attention_scale_max) * (1.0 - attention_scale_base) + attention_scale_base
+            word = word_seq[i]
+
+            # construct mask
+            mask = np.zeros(img.shape)
+            for seg_y in range(seg[0]):
+                for seg_x in range(seg[1]):
+                    mask = self._highlight_mask_area(mask, seg, (seg_x, seg_y), attention_scaled[seg_y, seg_x])
+
+            # construct weighted image
+            img_weighted = np.uint8(img * mask)
+
+            # save weighted image
+            #TODO
+
+            # verbose output
+            if True:
+                print('[ %s ] scale: %f ~ %f' % (word, attention_scale_min, attention_scale_max))
+                cv2.imshow('img_weighted', img_weighted)
+                cv2.waitKey(0)
+
+    def _test_save_result(self, image_file_path, caption, test_result_dir):
+        image_file_name = image_file_path.split(os.sep)[-1]
+        image_name, image_ext = os.path.splitext(image_file_name)
+        img = plt.imread(image_file_path)
+        plt.imshow(img)
+        plt.axis('off')
+        plt.title(caption)
+        plt.savefig(os.path.join(test_result_dir, image_name + '_result' + image_ext))
+
     def test(self, sess, test_data, vocabulary):
         """ Test the model using any given images. """
         print("Testing the model ...")
@@ -128,20 +198,25 @@ class BaseModel(object):
             for l in range(test_data.batch_size-fake_cnt):
                 word_idxs = caption_data[l][0].sentence
                 score = caption_data[l][0].score
+                alpha_seq = caption_data[l][0].alpha_seq
                 caption = vocabulary.get_sentence(word_idxs)
                 captions.append(caption)
                 scores.append(score)
 
+                # Save word attentions in image files
+                if True:
+                    image_file_path = batch[l]
+                    word_seq = []
+                    for i_word in range(len(word_idxs)):
+                        word_idx = word_idxs[i_word]
+                        word = vocabulary.words[word_idx]
+                        word_seq.append(word)
+                    self._test_save_attention_sequence(image_file_path, alpha_seq, word_seq, config.test_result_dir)
+
                 # Save the result in an image file
-                image_file = batch[l]
-                image_name = image_file.split(os.sep)[-1]
-                image_name = os.path.splitext(image_name)[0]
-                img = plt.imread(image_file)
-                plt.imshow(img)
-                plt.axis('off')
-                plt.title(caption)
-                plt.savefig(os.path.join(config.test_result_dir,
-                                         image_name+'_result.jpg'))
+                if False:
+                    image_file_path = batch[l]
+                    self._test_save_result(image_file_path, caption, config.test_result_dir)
 
         # Save the captions to a file
         results = pd.DataFrame({'image_files':test_data.image_files,
@@ -165,7 +240,8 @@ class BaseModel(object):
             initial_beam = CaptionData(sentence = [],
                                        memory = initial_memory[k],
                                        output = initial_output[k],
-                                       score = 1.0)
+                                       score = 1.0,
+                                       alpha_seq = [])
             partial_caption_data.append(TopN(config.beam_size))
             partial_caption_data[-1].push(initial_beam)
             complete_caption_data.append(TopN(config.beam_size))
@@ -194,8 +270,8 @@ class BaseModel(object):
                                         for pcl in partial_caption_data_lists],
                                         np.float32)
 
-                memory, output, scores = sess.run(
-                    [self.memory, self.output, self.probs],
+                memory, output, scores, alpha = sess.run(
+                    [self.memory, self.output, self.probs, self.alpha],
                     feed_dict = {self.contexts: contexts,
                                  self.last_word: last_word,
                                  self.last_memory: last_memory,
@@ -211,11 +287,13 @@ class BaseModel(object):
                     # Append each of these words to the current partial caption
                     for w, s in words_and_scores:
                         sentence = caption_data.sentence + [w]
+                        alpha_seq = caption_data.alpha_seq + [alpha[k]]
                         score = caption_data.score * s
                         beam = CaptionData(sentence,
                                            memory[k],
                                            output[k],
-                                           score)
+                                           score,
+                                           alpha_seq=alpha_seq)
                         if vocabulary.words[w] == '.':
                             complete_caption_data[k].push(beam)
                         else:
