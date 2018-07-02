@@ -4,6 +4,7 @@ import pandas as pd
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import cv2
+import skimage.transform
 import cPickle as pickle
 import copy
 import json
@@ -111,23 +112,6 @@ class BaseModel(object):
         scorer.evaluate()
         print("Evaluation complete.")
 
-    def _highlight_mask_area(self, mask, seg, loc, weight):
-        height = mask.shape[0]
-        width = mask.shape[1]
-        height_seg = float(height) / float(seg[1])
-        width_seg = float(width) / float(seg[0])
-
-        mask_augmented = np.zeros(mask.shape)
-        x_lower = int(loc[0] * width_seg)
-        x_upper = int((loc[0]+1) * width_seg)
-        y_lower = int(loc[1] * height_seg)
-        y_upper = int((loc[1]+1) * height_seg)
-        mask_augmented[y_lower:y_upper, x_lower:x_upper, :] = weight
-
-        mask = np.maximum(mask, mask_augmented)
-
-        return mask
-
     def _test_save_attention_sequence(self, image_file_path, alpha_seq, word_seq, test_result_dir, verbose=True):
         assert(len(alpha_seq) == len(word_seq))
 
@@ -145,16 +129,18 @@ class BaseModel(object):
         img = cv2.imread(image_file_path)
         for i in range(len(alpha_seq)):
             attention = np.reshape(alpha_seq[i], seg)
+            word = word_seq[i]
+
+            # rescale attention
             attention_scale_min = np.amin(attention)
             attention_scale_max = np.amax(attention)
             attention_scaled = (attention / attention_scale_max) * (1.0 - attention_scale_base) + attention_scale_base
-            word = word_seq[i]
+
+            # stack attention
+            attention_stacked = np.stack([attention_scaled, attention_scaled, attention_scaled], 2)
 
             # construct mask
-            mask = np.zeros(img.shape)
-            for seg_y in range(seg[0]):
-                for seg_x in range(seg[1]):
-                    mask = self._highlight_mask_area(mask, seg, (seg_x, seg_y), attention_scaled[seg_y, seg_x])
+            mask = skimage.transform.pyramid_expand(attention_stacked, upscale=16, sigma=20) # 14 * 16 = 224
 
             # construct weighted image
             img_weighted = np.uint8(img * mask)
