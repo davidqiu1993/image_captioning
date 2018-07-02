@@ -1,5 +1,7 @@
 *.pyc
 *.DS_Store
+*.npy
+*.csv
 
 /train/*
 /val/*
