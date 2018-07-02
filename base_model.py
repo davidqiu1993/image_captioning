@@ -141,6 +141,7 @@ class BaseModel(object):
 
             # construct mask
             mask = skimage.transform.pyramid_expand(attention_stacked, upscale=16, sigma=20) # 14 * 16 = 224
+            mask = cv2.resize(mask, (img.shape[1], img.shape[0]))
 
             # construct weighted image
             img_weighted = np.uint8(img * mask)
